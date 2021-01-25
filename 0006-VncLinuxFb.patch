@@ -1,0 +1,687 @@
+diff -Naur qtbase-everywhere-src-5.11.2/src/plugins/platforms/linuxfb/qlinuxfbscreen.h qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/linuxfb/qlinuxfbscreen.h
+--- qtbase-everywhere-src-5.11.2/src/plugins/platforms/linuxfb/qlinuxfbscreen.h	2018-09-13 06:25:10.000000000 +0200
++++ qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/linuxfb/qlinuxfbscreen.h	2019-01-22 13:09:10.601440247 +0100
+@@ -49,6 +49,7 @@
+ 
+ class QLinuxFbScreen : public QFbScreen
+ {
++friend class QVncLinuxfbScreen;
+     Q_OBJECT
+ public:
+     QLinuxFbScreen(const QStringList &args);
+diff -Naur qtbase-everywhere-src-5.11.2/src/plugins/platforms/platforms.pro qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/platforms.pro
+--- qtbase-everywhere-src-5.11.2/src/plugins/platforms/platforms.pro	2018-09-13 06:25:10.000000000 +0200
++++ qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/platforms.pro	2019-01-22 13:09:10.601440247 +0100
+@@ -38,6 +38,8 @@
+ 
+ qtHaveModule(network):qtConfig(vnc): SUBDIRS += vnc
+ 
++if (contains(SUBDIRS, linuxfb) : contains(SUBDIRS, vnc)) { SUBDIRS += vnc-linuxfb }
++
+ freebsd {
+     SUBDIRS += bsdfb
+ }
+diff -Naur qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc/qvnc.cpp qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc/qvnc.cpp
+--- qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc/qvnc.cpp	2018-09-13 06:25:10.000000000 +0200
++++ qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc/qvnc.cpp	2019-01-22 13:11:51.761434792 +0100
+@@ -620,6 +620,7 @@
+ QVncServer::QVncServer(QVncScreen *screen, quint16 port)
+     : qvnc_screen(screen)
+     , m_port(port)
++    , clientsCount(0)
+ {
+     QMetaObject::invokeMethod(this, "init", Qt::QueuedConnection);
+ }
+@@ -656,6 +657,7 @@
+ {
+     auto clientSocket = serverSocket->nextPendingConnection();
+     clients.append(new QVncClient(clientSocket, this));
++    clientsCount++;
+ 
+     dirtyMap()->reset();
+ 
+@@ -667,6 +669,7 @@
+ void QVncServer::discardClient(QVncClient *client)
+ {
+     clients.removeOne(client);
++    clientsCount--;
+     client->deleteLater();
+     if (clients.isEmpty()) {
+         qvnc_screen->disableClientCursor(client);
+diff -Naur qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc/qvnc_p.h qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc/qvnc_p.h
+--- qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc/qvnc_p.h	2018-09-13 06:25:10.000000000 +0200
++++ qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc/qvnc_p.h	2019-01-22 13:11:28.321435585 +0100
+@@ -46,6 +46,7 @@
+ #include <QtCore/qbytearray.h>
+ #include <QtCore/qvarlengtharray.h>
+ #include <qpa/qplatformcursor.h>
++#include <QAtomicInt>
+ 
+ QT_BEGIN_NAMESPACE
+ 
+@@ -401,6 +402,7 @@
+     inline QVncDirtyMap* dirtyMap() const { return qvnc_screen->dirty; }
+     QImage screenImage() const;
+     void discardClient(QVncClient *client);
++    qint32 getClientsCount() const { return clientsCount.load(); }
+ 
+ private slots:
+     void newConnection();
+@@ -411,6 +413,7 @@
+     QVector<QVncClient*> clients;
+     QVncScreen *qvnc_screen;
+     quint16 m_port;
++    QAtomicInt clientsCount;
+ };
+ 
+ QT_END_NAMESPACE
+diff -Naur qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/main.cpp qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/main.cpp
+--- qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/main.cpp	1970-01-01 01:00:00.000000000 +0100
++++ qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/main.cpp	2019-01-22 13:10:33.545437439 +0100
+@@ -0,0 +1,65 @@
++/****************************************************************************
++**
++** Copyright (C) 2016 The Qt Company Ltd.
++** Contact: https://www.qt.io/licensing/
++**
++** This file is part of the QtGui module of the Qt Toolkit.
++**
++** $QT_BEGIN_LICENSE:LGPL$
++** Commercial License Usage
++** Licensees holding valid commercial Qt licenses may use this file in
++** accordance with the commercial license agreement provided with the
++** Software or, alternatively, in accordance with the terms contained in
++** a written agreement between you and The Qt Company. For licensing terms
++** and conditions see https://www.qt.io/terms-conditions. For further
++** information use the contact form at https://www.qt.io/contact-us.
++**
++** GNU Lesser General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU Lesser
++** General Public License version 3 as published by the Free Software
++** Foundation and appearing in the file LICENSE.LGPL3 included in the
++** packaging of this file. Please review the following information to
++** ensure the GNU Lesser General Public License version 3 requirements
++** will be met: https://www.gnu.org/licenses/lgpl-3.0.html.
++**
++** GNU General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU
++** General Public License version 2.0 or (at your option) the GNU General
++** Public license version 3 or any later version approved by the KDE Free
++** Qt Foundation. The licenses are as published by the Free Software
++** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
++** included in the packaging of this file. Please review the following
++** information to ensure the GNU General Public License requirements will
++** be met: https://www.gnu.org/licenses/gpl-2.0.html and
++** https://www.gnu.org/licenses/gpl-3.0.html.
++**
++** $QT_END_LICENSE$
++**
++****************************************************************************/
++
++#include <qpa/qplatformintegrationplugin.h>
++#include "qvnclinuxfbintegration.h"
++#include "../vnc/qvnc_p.h"
++
++QT_BEGIN_NAMESPACE
++
++class QVncLinuxfbIntegrationPlugin : public QPlatformIntegrationPlugin
++{
++    Q_OBJECT
++    Q_PLUGIN_METADATA(IID QPlatformIntegrationFactoryInterface_iid FILE "vnc-linuxfb.json")
++public:
++    QPlatformIntegration *create(const QString&, const QStringList&) override;
++};
++
++QPlatformIntegration* QVncLinuxfbIntegrationPlugin::create(const QString& system, const QStringList& paramList)
++{
++    if (!system.compare(QLatin1String("vnc-linuxfb"), Qt::CaseInsensitive))
++        return new QVncLinuxfbIntegration(paramList);
++
++    return 0;
++}
++
++QT_END_NAMESPACE
++
++#include "main.moc"
++
+diff -Naur qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbintegration.cpp qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbintegration.cpp
+--- qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbintegration.cpp	1970-01-01 01:00:00.000000000 +0100
++++ qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbintegration.cpp	2019-01-22 13:10:33.545437439 +0100
+@@ -0,0 +1,231 @@
++/****************************************************************************
++**
++** Copyright (C) 2017 The Qt Company Ltd.
++** Contact: https://www.qt.io/licensing/
++**
++** This file is part of the plugins of the Qt Toolkit.
++**
++** $QT_BEGIN_LICENSE:LGPL$
++** Commercial License Usage
++** Licensees holding valid commercial Qt licenses may use this file in
++** accordance with the commercial license agreement provided with the
++** Software or, alternatively, in accordance with the terms contained in
++** a written agreement between you and The Qt Company. For licensing terms
++** and conditions see https://www.qt.io/terms-conditions. For further
++** information use the contact form at https://www.qt.io/contact-us.
++**
++** GNU Lesser General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU Lesser
++** General Public License version 3 as published by the Free Software
++** Foundation and appearing in the file LICENSE.LGPL3 included in the
++** packaging of this file. Please review the following information to
++** ensure the GNU Lesser General Public License version 3 requirements
++** will be met: https://www.gnu.org/licenses/lgpl-3.0.html.
++**
++** GNU General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU
++** General Public License version 2.0 or (at your option) the GNU General
++** Public license version 3 or any later version approved by the KDE Free
++** Qt Foundation. The licenses are as published by the Free Software
++** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
++** included in the packaging of this file. Please review the following
++** information to ensure the GNU General Public License requirements will
++** be met: https://www.gnu.org/licenses/gpl-2.0.html and
++** https://www.gnu.org/licenses/gpl-3.0.html.
++**
++** $QT_END_LICENSE$
++**
++****************************************************************************/
++#include "qvnclinuxfbintegration.h"
++#include "qvnclinuxfbscreen.h"
++#include "../vnc/qvnc_p.h"
++
++#include <QtFontDatabaseSupport/private/qgenericunixfontdatabase_p.h>
++#include <QtServiceSupport/private/qgenericunixservices_p.h>
++#include <QtEventDispatcherSupport/private/qgenericunixeventdispatcher_p.h>
++
++#include <QtFbSupport/private/qfbbackingstore_p.h>
++#include <QtFbSupport/private/qfbwindow_p.h>
++#include <QtFbSupport/private/qfbcursor_p.h>
++#include <QtFbSupport/private/qfbvthandler_p.h>
++
++#include <QtGui/private/qguiapplication_p.h>
++#include <qpa/qplatforminputcontextfactory_p.h>
++#include <private/qinputdevicemanager_p_p.h>
++
++#include <QtCore/QRegularExpression>
++
++#if QT_CONFIG(libinput)
++#include <QtInputSupport/private/qlibinputhandler_p.h>
++#endif
++
++#if QT_CONFIG(evdev)
++#include <QtInputSupport/private/qevdevmousemanager_p.h>
++#include <QtInputSupport/private/qevdevkeyboardmanager_p.h>
++#include <QtInputSupport/private/qevdevtouchmanager_p.h>
++#endif
++
++#if QT_CONFIG(tslib)
++#include <QtInputSupport/private/qtslib_p.h>
++#endif
++
++QT_BEGIN_NAMESPACE
++
++
++namespace
++{
++
++class QVncLinuxfbPlatformNativeInterface : public QPlatformNativeInterface
++{
++public:
++    QVncLinuxfbPlatformNativeInterface(QVncServer* serverPtr)
++    {
++        _serverPtr = serverPtr;
++    }
++
++    QFunctionPointer platformFunction(const QByteArray &function) const override
++    {
++        const QByteArray lowerCaseFunction = function.toLower();
++
++        if (lowerCaseFunction == QByteArray("vncclientscount"))
++        {
++            QFunctionPointer fp = reinterpret_cast<QFunctionPointer>(&QVncLinuxfbPlatformNativeInterface::vncClientsCount);
++            return fp;
++        }
++        else
++            return nullptr;
++    }
++
++protected:
++    static int vncClientsCount()
++    {
++        if (_serverPtr) return _serverPtr->getClientsCount();
++        else return 0;
++    }
++
++    static QVncServer* _serverPtr;
++};
++
++QVncServer* QVncLinuxfbPlatformNativeInterface::_serverPtr = nullptr;
++
++}
++
++QVncLinuxfbIntegration::QVncLinuxfbIntegration(const QStringList &paramList)
++    : m_fontDb(new QGenericUnixFontDatabase),
++      m_services(new QGenericUnixServices)
++{
++    QRegularExpression portRx(QLatin1String("port=(\\d+)"));
++    quint16 port = 5900;
++    for (const QString &arg : paramList) {
++        QRegularExpressionMatch match;
++        if (arg.contains(portRx, &match))
++            port = match.captured(1).toInt();
++    }
++
++    m_primaryScreen = new QVncLinuxfbScreen(paramList);
++
++    m_server = new QVncServer(m_primaryScreen, port);
++    m_primaryScreen->vncServer = m_server;
++}
++
++QVncLinuxfbIntegration::~QVncLinuxfbIntegration()
++{
++    delete m_server;
++    destroyScreen(m_primaryScreen);
++}
++
++void QVncLinuxfbIntegration::initialize()
++{
++    if (m_primaryScreen->initialize())
++        screenAdded(m_primaryScreen);
++    else
++        qWarning("vnc: Failed to initialize screen");
++
++    m_inputContext = QPlatformInputContextFactory::create();
++
++    m_nativeInterface.reset(new QVncLinuxfbPlatformNativeInterface(m_server));
++
++    m_vtHandler.reset(new QFbVtHandler);
++
++    // we always have exactly one mouse and keyboard
++    QInputDeviceManagerPrivate::get(QGuiApplicationPrivate::inputDeviceManager())->setDeviceCount(
++        QInputDeviceManager::DeviceTypePointer, 1);
++    QInputDeviceManagerPrivate::get(QGuiApplicationPrivate::inputDeviceManager())->setDeviceCount(
++        QInputDeviceManager::DeviceTypeKeyboard, 1);
++
++    if (!qEnvironmentVariableIntValue("QT_QPA_FB_DISABLE_INPUT"))
++        createInputHandlers();
++}
++
++void QVncLinuxfbIntegration::createInputHandlers()
++{
++#if QT_CONFIG(libinput)
++    if (!qEnvironmentVariableIntValue("QT_QPA_FB_NO_LIBINPUT")) {
++        new QLibInputHandler(QLatin1String("libinput"), QString());
++        return;
++    }
++#endif
++
++#if QT_CONFIG(tslib)
++    bool useTslib = qEnvironmentVariableIntValue("QT_QPA_FB_TSLIB");
++    if (useTslib)
++        new QTsLibMouseHandler(QLatin1String("TsLib"), QString());
++#endif
++
++#if QT_CONFIG(evdev)
++    new QEvdevKeyboardManager(QLatin1String("EvdevKeyboard"), QString(), this);
++    new QEvdevMouseManager(QLatin1String("EvdevMouse"), QString(), this);
++#if QT_CONFIG(tslib)
++    if (!useTslib)
++#endif
++        new QEvdevTouchManager(QLatin1String("EvdevTouch"), QString() /* spec */, this);
++#endif
++}
++
++bool QVncLinuxfbIntegration::hasCapability(QPlatformIntegration::Capability cap) const
++{
++    switch (cap) {
++    case ThreadedPixmaps: return true;
++    case WindowManagement: return false;
++    default: return QPlatformIntegration::hasCapability(cap);
++    }
++}
++
++QPlatformBackingStore *QVncLinuxfbIntegration::createPlatformBackingStore(QWindow *window) const
++{
++    return new QFbBackingStore(window);
++}
++
++QPlatformWindow *QVncLinuxfbIntegration::createPlatformWindow(QWindow *window) const
++{
++    return new QFbWindow(window);
++}
++
++QAbstractEventDispatcher *QVncLinuxfbIntegration::createEventDispatcher() const
++{
++    return createUnixEventDispatcher();
++}
++
++QList<QPlatformScreen *> QVncLinuxfbIntegration::screens() const
++{
++    QList<QPlatformScreen *> list;
++    list.append(m_primaryScreen);
++    return list;
++}
++
++QPlatformFontDatabase *QVncLinuxfbIntegration::fontDatabase() const
++{
++    return m_fontDb.data();
++}
++
++QPlatformServices *QVncLinuxfbIntegration::services() const
++{
++    return m_services.data();
++}
++
++QPlatformNativeInterface *QVncLinuxfbIntegration::nativeInterface() const
++{
++    return m_nativeInterface.data();
++}
++
++QT_END_NAMESPACE
+diff -Naur qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbintegration.h qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbintegration.h
+--- qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbintegration.h	1970-01-01 01:00:00.000000000 +0100
++++ qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbintegration.h	2019-01-22 13:10:41.285437177 +0100
+@@ -0,0 +1,89 @@
++/****************************************************************************
++**
++** Copyright (C) 2016 The Qt Company Ltd.
++** Contact: https://www.qt.io/licensing/
++**
++** This file is part of the QtGui module of the Qt Toolkit.
++**
++** $QT_BEGIN_LICENSE:LGPL$
++** Commercial License Usage
++** Licensees holding valid commercial Qt licenses may use this file in
++** accordance with the commercial license agreement provided with the
++** Software or, alternatively, in accordance with the terms contained in
++** a written agreement between you and The Qt Company. For licensing terms
++** and conditions see https://www.qt.io/terms-conditions. For further
++** information use the contact form at https://www.qt.io/contact-us.
++**
++** GNU Lesser General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU Lesser
++** General Public License version 3 as published by the Free Software
++** Foundation and appearing in the file LICENSE.LGPL3 included in the
++** packaging of this file. Please review the following information to
++** ensure the GNU Lesser General Public License version 3 requirements
++** will be met: https://www.gnu.org/licenses/lgpl-3.0.html.
++**
++** GNU General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU
++** General Public License version 2.0 or (at your option) the GNU General
++** Public license version 3 or any later version approved by the KDE Free
++** Qt Foundation. The licenses are as published by the Free Software
++** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
++** included in the packaging of this file. Please review the following
++** information to ensure the GNU General Public License requirements will
++** be met: https://www.gnu.org/licenses/gpl-2.0.html and
++** https://www.gnu.org/licenses/gpl-3.0.html.
++**
++** $QT_END_LICENSE$
++**
++****************************************************************************/
++
++#ifndef QVNCLINUXFBINTEGRATION_H
++#define QVNCLINUXFBINTEGRATION_H
++
++#include <qpa/qplatformintegration.h>
++#include <qpa/qplatformnativeinterface.h>
++
++QT_BEGIN_NAMESPACE
++
++class QAbstractEventDispatcher;
++class QVncScreen;
++class QVncServer;
++class QFbVtHandler;
++
++class QVncLinuxfbIntegration : public QPlatformIntegration, public QPlatformNativeInterface
++{
++public:
++    QVncLinuxfbIntegration(const QStringList &paramList);
++    ~QVncLinuxfbIntegration();
++
++    void initialize() override;
++    bool hasCapability(QPlatformIntegration::Capability cap) const override;
++
++    QPlatformWindow *createPlatformWindow(QWindow *window) const override;
++    QPlatformBackingStore *createPlatformBackingStore(QWindow *window) const override;
++
++    QAbstractEventDispatcher *createEventDispatcher() const override;
++
++    QPlatformFontDatabase *fontDatabase() const override;
++    QPlatformServices *services() const override;
++    QPlatformInputContext *inputContext() const override { return m_inputContext; }
++
++    QPlatformNativeInterface *nativeInterface() const override;
++
++    QList<QPlatformScreen *> screens() const;
++
++private:
++    void createInputHandlers();
++
++    mutable QVncServer *m_server;
++    QVncScreen *m_primaryScreen;
++    QPlatformInputContext *m_inputContext;
++    QScopedPointer<QPlatformFontDatabase> m_fontDb;
++    QScopedPointer<QPlatformServices> m_services;
++    QScopedPointer<QPlatformNativeInterface> m_nativeInterface;
++    QScopedPointer<QFbVtHandler> m_vtHandler;
++};
++
++QT_END_NAMESPACE
++
++#endif // QVNCINTEGRATION_H
+diff -Naur qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbscreen.cpp qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbscreen.cpp
+--- qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbscreen.cpp	1970-01-01 01:00:00.000000000 +0100
++++ qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbscreen.cpp	2019-01-22 13:10:33.545437439 +0100
+@@ -0,0 +1,97 @@
++/****************************************************************************
++**
++** Copyright (C) 2016 The Qt Company Ltd.
++** Contact: https://www.qt.io/licensing/
++**
++** This file is part of the QtGui module of the Qt Toolkit.
++**
++** $QT_BEGIN_LICENSE:LGPL$
++** Commercial License Usage
++** Licensees holding valid commercial Qt licenses may use this file in
++** accordance with the commercial license agreement provided with the
++** Software or, alternatively, in accordance with the terms contained in
++** a written agreement between you and The Qt Company. For licensing terms
++** and conditions see https://www.qt.io/terms-conditions. For further
++** information use the contact form at https://www.qt.io/contact-us.
++**
++** GNU Lesser General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU Lesser
++** General Public License version 3 as published by the Free Software
++** Foundation and appearing in the file LICENSE.LGPL3 included in the
++** packaging of this file. Please review the following information to
++** ensure the GNU Lesser General Public License version 3 requirements
++** will be met: https://www.gnu.org/licenses/lgpl-3.0.html.
++**
++** GNU General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU
++** General Public License version 2.0 or (at your option) the GNU General
++** Public license version 3 or any later version approved by the KDE Free
++** Qt Foundation. The licenses are as published by the Free Software
++** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
++** included in the packaging of this file. Please review the following
++** information to ensure the GNU General Public License requirements will
++** be met: https://www.gnu.org/licenses/gpl-2.0.html and
++** https://www.gnu.org/licenses/gpl-3.0.html.
++**
++** $QT_END_LICENSE$
++**
++****************************************************************************/
++
++#include "qvnclinuxfbscreen.h"
++
++#include <QtGui/QPainter>
++#include <QtCore/QRegularExpression>
++
++QT_BEGIN_NAMESPACE
++
++QVncLinuxfbScreen::QVncLinuxfbScreen(const QStringList &args) :
++QVncScreen(args),
++mFbScreen(args)
++{}
++
++bool
++QVncLinuxfbScreen::initialize()
++{
++    if(!mFbScreen.initialize())
++        return false;
++
++    QRegularExpression sizeRx(QLatin1String("size=(\\d+)x(\\d+)"));
++    QRegularExpression mmSizeRx(QLatin1String("mmsize=(?<width>(\\d*\\.)?\\d+)x(?<height>(\\d*\\.)?\\d+)"));
++    QRegularExpression depthRx(QLatin1String("depth=(\\d+)"));
++
++    bool sizeFound(false), mmsizeFound(false), depthFound(false);
++    for (const QString &arg : mArgs)
++    {
++        QRegularExpressionMatch match;
++        if (arg.contains(mmSizeRx, &match)) mmsizeFound = true;
++        else if (arg.contains(sizeRx, &match)) sizeFound = true;
++        else if (arg.contains(depthRx, &match)) depthFound = true;
++    }
++
++    if (!sizeFound) mArgs.push_back(QString("size=%1x%2").arg(mFbScreen.mGeometry.width()).arg(mFbScreen.mGeometry.height()));
++    if (!mmsizeFound) mArgs.push_back(QString("mmsize=%1x%2").arg(static_cast<qint32>(mFbScreen.mGeometry.width())).arg(static_cast<qint32>(mFbScreen.mGeometry.height())));
++    if (!depthFound) mArgs.push_back(QString("depth=%1").arg(mDepth));
++
++    return QVncScreen::initialize();
++}
++
++QRegion
++QVncLinuxfbScreen::doRedraw()
++{
++    QRegion touched = QVncScreen::doRedraw();
++
++    if (touched.isEmpty())
++        return touched;
++
++    if (!mFbScreen.mBlitter)
++        mFbScreen.mBlitter = new QPainter(&mFbScreen.mFbScreenImage);
++
++    mFbScreen.mBlitter->setCompositionMode(QPainter::CompositionMode_Source);
++    for (const QRect &rect : touched)
++        mFbScreen.mBlitter->drawImage(rect, mScreenImage, rect);
++
++    return touched;
++}
++
++QT_END_NAMESPACE
++
+diff -Naur qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbscreen.h qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbscreen.h
+--- qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbscreen.h	1970-01-01 01:00:00.000000000 +0100
++++ qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/qvnclinuxfbscreen.h	2019-01-22 13:10:41.285437177 +0100
+@@ -0,0 +1,62 @@
++/****************************************************************************
++**
++** Copyright (C) 2016 The Qt Company Ltd.
++** Contact: https://www.qt.io/licensing/
++**
++** This file is part of the QtGui module of the Qt Toolkit.
++**
++** $QT_BEGIN_LICENSE:LGPL$
++** Commercial License Usage
++** Licensees holding valid commercial Qt licenses may use this file in
++** accordance with the commercial license agreement provided with the
++** Software or, alternatively, in accordance with the terms contained in
++** a written agreement between you and The Qt Company. For licensing terms
++** and conditions see https://www.qt.io/terms-conditions. For further
++** information use the contact form at https://www.qt.io/contact-us.
++**
++** GNU Lesser General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU Lesser
++** General Public License version 3 as published by the Free Software
++** Foundation and appearing in the file LICENSE.LGPL3 included in the
++** packaging of this file. Please review the following information to
++** ensure the GNU Lesser General Public License version 3 requirements
++** will be met: https://www.gnu.org/licenses/lgpl-3.0.html.
++**
++** GNU General Public License Usage
++** Alternatively, this file may be used under the terms of the GNU
++** General Public License version 2.0 or (at your option) the GNU General
++** Public license version 3 or any later version approved by the KDE Free
++** Qt Foundation. The licenses are as published by the Free Software
++** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
++** included in the packaging of this file. Please review the following
++** information to ensure the GNU General Public License requirements will
++** be met: https://www.gnu.org/licenses/gpl-2.0.html and
++** https://www.gnu.org/licenses/gpl-3.0.html.
++**
++** $QT_END_LICENSE$
++**
++****************************************************************************/
++
++#ifndef QVncLinuxfbScreen_H
++#define QVncLinuxfbScreen_H
++
++#include "../linuxfb/qlinuxfbscreen.h"
++#include "../vnc/qvncscreen.h"
++
++QT_BEGIN_NAMESPACE
++
++class QVncLinuxfbScreen : public QVncScreen
++{
++public:
++    QVncLinuxfbScreen(const QStringList &args);
++    bool initialize() override;
++    QRegion doRedraw() override;
++
++protected:
++    QLinuxFbScreen mFbScreen;
++};
++
++QT_END_NAMESPACE
++
++#endif // QVncScreen_H
++
+diff -Naur qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/vnc-linuxfb.json qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/vnc-linuxfb.json
+--- qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/vnc-linuxfb.json	1970-01-01 01:00:00.000000000 +0100
++++ qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/vnc-linuxfb.json	2019-01-22 13:09:10.605440247 +0100
+@@ -0,0 +1,3 @@
++{
++    "Keys": [ "vnc-linuxfb" ]
++}
+diff -Naur qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/vnc-linuxfb.pro qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/vnc-linuxfb.pro
+--- qtbase-everywhere-src-5.11.2/src/plugins/platforms/vnc-linuxfb/vnc-linuxfb.pro	1970-01-01 01:00:00.000000000 +0100
++++ qtbase-everywhere-src-5.11.2-patched/src/plugins/platforms/vnc-linuxfb/vnc-linuxfb.pro	2019-01-22 13:09:10.605440247 +0100
+@@ -0,0 +1,35 @@
++TARGET = qvnc-linuxfb
++
++QT += \
++    core-private network gui-private \
++    service_support-private theme_support-private fb_support-private \
++    eventdispatcher_support-private fontdatabase_support-private
++
++qtHaveModule(input_support-private): \
++    QT += input_support-private
++
++DEFINES += QT_NO_FOREACH
++
++SOURCES = \
++    main.cpp \
++    qvnclinuxfbintegration.cpp \
++    qvnclinuxfbscreen.cpp \
++    ../vnc/qvncscreen.cpp \
++    ../linuxfb/qlinuxfbscreen.cpp \
++    ../vnc/qvnc.cpp \
++    ../vnc/qvncclient.cpp
++
++HEADERS = \
++    qvnclinuxfbintegration.h \
++    ../vnc/qvncscreen.h \
++    qvnclinuxfbscreen.h \
++    ../linuxfb/qlinuxfbscreen.h \
++    ../vnc/qvnc_p.h \
++    ../vnc/qvncclient.h
++
++OTHER_FILES += vnc-linuxfb.json
++
++PLUGIN_TYPE = platforms
++PLUGIN_CLASS_NAME = QVncLinuxfbIntegrationPlugin
++!equals(TARGET, $$QT_DEFAULT_QPA_PLUGIN): PLUGIN_EXTENDS = -
++load(qt_plugin)
